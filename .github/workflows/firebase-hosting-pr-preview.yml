@@ -1,0 +1,33 @@
+name: Firebase Hosting PR Preview
+
+# PR마다 Flutter Web을 빌드해 Firebase Hosting 프리뷰 채널에 올리고 PR에
+# 미리보기 링크를 댓글로 남긴다. main 배포와 동일한 시크릿이 필요하다
+# (FIREBASE_PROJECT_ID, FIREBASE_SERVICE_ACCOUNT — deploy.yml 참고).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  preview:
+    name: Build & deploy preview channel
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build web --release
+
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: "${{ secrets.GITHUB_TOKEN }}"
+          firebaseServiceAccount: "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}"
+          projectId: "${{ secrets.FIREBASE_PROJECT_ID }}"
+          expires: 7d
