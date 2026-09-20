@@ -9,7 +9,8 @@ name: Deploy to Firebase
 #                             발급한 JSON 키 전체 내용(그대로 붙여넣기)
 #
 # 서비스 계정에는 Firebase Admin, Cloud Functions 배포, Firebase Hosting Admin
-# 권한이 필요하다. 시크릿을 등록하기 전에는 이 워크플로가 실패한다.
+# 권한이 필요하다. 시크릿이 등록되기 전에는 아래 job이 실패 대신 건너뛰기(skip)
+# 상태로 표시된다.
 
 on:
   push:
@@ -20,6 +21,7 @@ jobs:
     name: Build & deploy
     runs-on: ubuntu-latest
     environment: production
+    if: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
     steps:
       - uses: actions/checkout@v4
 

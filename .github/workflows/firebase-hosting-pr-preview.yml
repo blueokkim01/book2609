@@ -12,6 +12,9 @@ jobs:
   preview:
     name: Build & deploy preview channel
     runs-on: ubuntu-latest
+    # FIREBASE_SERVICE_ACCOUNT 시크릿이 아직 등록되지 않았으면(초기 설정 전,
+    # 또는 포크에서 온 PR) 실패시키지 않고 건너뛴다.
+    if: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
     permissions:
       pull-requests: write
       checks: write
