@@ -1,0 +1,39 @@
+rules_version = '2';
+
+service firebase.storage {
+  function isSignedIn() {
+    return request.auth != null;
+  }
+
+  // Storage 규칙에서 Cloud Firestore 문서를 조회해 교사-학생 관계를 확인한다.
+  // (Firebase Storage Security Rules의 firestore.get() 크로스 서비스 조회 기능)
+  function isTeacherOfStudent(studentUid) {
+    let requester = firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    let student = firestore.get(/databases/(default)/documents/users/$(studentUid)).data;
+    return requester.role == 'teacher'
+      && requester.schoolCode == student.schoolCode
+      && requester.classCode == student.classCode;
+  }
+
+  match /b/{bucket}/o {
+    // 인증 사진 경로: submission_photos/{studentUid}/{submissionId}/{fileName}
+    // ⚠️ 용량 제한(5MB)만으로는 접근 제어가 되지 않으므로, read를 본인과
+    // 담당 교사로 명시적으로 제한한다.
+    match /submission_photos/{studentUid}/{submissionId}/{fileName} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == studentUid || isTeacherOfStudent(studentUid));
+
+      allow write: if isSignedIn()
+        && request.auth.uid == studentUid
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+
+      allow delete: if false;
+    }
+
+    // 그 외 모든 경로는 기본적으로 차단한다.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

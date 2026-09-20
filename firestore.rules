@@ -1,0 +1,209 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------------
+    // 공통 헬퍼
+    // ---------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function userData(id) {
+      return get(/databases/$(database)/documents/users/$(id)).data;
+    }
+
+    function myData() {
+      return userData(uid());
+    }
+
+    function myRole() {
+      return myData().role;
+    }
+
+    function isOwner(id) {
+      return isSignedIn() && uid() == id;
+    }
+
+    function isTeacher() {
+      return isSignedIn() && myRole() == 'teacher';
+    }
+
+    function isStudent() {
+      return isSignedIn() && myRole() == 'student';
+    }
+
+    function isParent() {
+      return isSignedIn() && myRole() == 'parent';
+    }
+
+    // 요청자가 [studentId]의 담임(같은 school/class) 교사인지.
+    function isTeacherOfStudent(studentId) {
+      return isTeacher()
+        && userData(studentId).schoolCode == myData().schoolCode
+        && userData(studentId).classCode == myData().classCode;
+    }
+
+    // 요청자가 [studentId]와 동의된 guardianLinks로 연결된 학부모인지.
+    // guardianLinks 문서 id는 항상 `{parentUid}_{studentUid}` 형식으로 고정한다.
+    function isLinkedParentOf(studentId) {
+      return isParent()
+        && exists(/databases/$(database)/documents/guardianLinks/$(uid() + '_' + studentId));
+    }
+
+    function isOwnedChallenge(challengeId) {
+      return get(/databases/$(database)/documents/challenges/$(challengeId)).data.teacherId == uid();
+    }
+
+    // ---------------------------------------------------------------------
+    // users/{uid}
+    // ⚠️ points, badgeIds는 Cloud Functions(관리자 SDK, 규칙 우회)만 갱신한다.
+    // 클라이언트 write는 이 두 필드를 절대 변경할 수 없도록 강제한다.
+    // ---------------------------------------------------------------------
+    match /users/{userId} {
+      allow read: if isOwner(userId)
+        || isTeacherOfStudent(userId)
+        || isLinkedParentOf(userId);
+
+      allow create: if isOwner(userId)
+        && request.resource.data.role in ['student', 'teacher', 'parent']
+        && request.resource.data.nickname is string
+        && request.resource.data.nickname.size() >= 2
+        && request.resource.data.schoolCode is string
+        && request.resource.data.classCode is string
+        // 신규 가입 시 포인트/뱃지는 반드시 기본값이어야 한다.
+        && request.resource.data.points == 0
+        && request.resource.data.badgeIds.size() == 0;
+
+      allow update: if isOwner(userId)
+        // 게이미피케이션 필드는 불변(서버만 변경 가능).
+        && request.resource.data.points == resource.data.points
+        && request.resource.data.badgeIds == resource.data.badgeIds
+        // 가입 시 결정된 소속/역할도 클라이언트가 임의로 바꿀 수 없다.
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.schoolCode == resource.data.schoolCode
+        && request.resource.data.classCode == resource.data.classCode;
+
+      allow delete: if false;
+
+      match /fcmTokens/{token} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId);
+        // 읽음 처리(read 필드)만 클라이언트가 수정 가능. 생성은 서버 전용.
+        allow update: if isOwner(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+        allow create, delete: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // challenges/{challengeId}
+    // ---------------------------------------------------------------------
+    match /challenges/{challengeId} {
+      allow read: if isSignedIn() && (
+        (isStudent() && resource.data.schoolCode == myData().schoolCode
+          && resource.data.classCode == myData().classCode)
+        || (isTeacher() && resource.data.teacherId == uid())
+      );
+
+      allow create: if isTeacher()
+        && request.resource.data.teacherId == uid()
+        && request.resource.data.schoolCode == myData().schoolCode
+        && request.resource.data.classCode == myData().classCode
+        && request.resource.data.requiredMethods is list
+        && request.resource.data.requiredMethods.size() >= 1;
+
+      allow update, delete: if isTeacher() && resource.data.teacherId == uid();
+    }
+
+    // ---------------------------------------------------------------------
+    // submissions/{submissionId}
+    // 승인/반려 상태 전이는 클라이언트가 쓸 수 있지만, 그 결과로 파생되는
+    // 포인트/뱃지 지급은 Cloud Functions만 수행한다(users 문서 규칙 참고).
+    // ---------------------------------------------------------------------
+    match /submissions/{submissionId} {
+      allow read: if isSignedIn() && (
+        isOwner(resource.data.userId)
+        || (isTeacher() && isOwnedChallenge(resource.data.challengeId))
+        || isLinkedParentOf(resource.data.userId)
+      );
+
+      allow create: if isStudent()
+        && request.resource.data.userId == uid()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.photoUrl is string
+        && request.resource.data.bookTitle is string
+        && !('reviewedAt' in request.resource.data)
+        && !('reviewerNote' in request.resource.data)
+        // 독후감 또는 퀴즈 중 최소 1개는 있어야 한다.
+        && ('reviewText' in request.resource.data || 'quizAnswers' in request.resource.data);
+
+      // 교사만 검토 상태를 전이시킬 수 있고, pending 상태에서만 승인/반려 가능하며
+      // 제출 본문(userId/challengeId/bookTitle/photoUrl 등)은 바꿀 수 없다.
+      allow update: if isTeacher()
+        && isOwnedChallenge(resource.data.challengeId)
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['approved', 'rejected']
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.challengeId == resource.data.challengeId
+        && request.resource.data.bookTitle == resource.data.bookTitle
+        && request.resource.data.photoUrl == resource.data.photoUrl;
+
+      allow delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // badges/{badgeId} — 뱃지 카탈로그(정의). 모든 로그인 사용자가 읽을 수
+    // 있고, 쓰기는 Cloud Functions/관리자 콘솔 시드 스크립트만 수행한다.
+    // ---------------------------------------------------------------------
+    match /badges/{badgeId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // guardianLinks/{linkId} — 문서 id는 `{parentUid}_{studentUid}` 고정.
+    // ---------------------------------------------------------------------
+    match /guardianLinks/{linkId} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == resource.data.parentUid
+        || request.auth.uid == resource.data.studentUid
+      );
+
+      allow create: if isParent()
+        && linkId == uid() + '_' + request.resource.data.studentUid
+        && request.resource.data.parentUid == uid()
+        && request.resource.data.consentBy is string
+        && request.resource.data.consentBy.size() > 0;
+
+      allow update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // reports/{reportId} — 독후감 신고. 생성만 가능하고, 열람은 교사만.
+    // ---------------------------------------------------------------------
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && request.resource.data.reporterUid == uid();
+      allow read: if isTeacher();
+      allow update, delete: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // leaderboards/{leaderboardId}/entries/{uid} — 학급 리더보드(비정규화).
+    // Cloud Functions가 제출 승인 시 갱신한다. 닉네임/포인트만 담아 민감도가
+    // 낮으므로 로그인 사용자 전체에게 읽기를 허용한다.
+    // ---------------------------------------------------------------------
+    match /leaderboards/{leaderboardId}/entries/{entryId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+  }
+}
